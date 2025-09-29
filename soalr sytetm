@@ -1,0 +1,120 @@
+import base64
+from io import BytesIO
+from dataclasses import dataclass
+import streamlit as st
+
+# ── OpenAI 클라이언트 (최신 SDK 기준) ─────────────────────────────────────────
+# 1) 환경변수 OPENAI_API_KEY 또는
+# 2) .streamlit/secrets.toml 의 openai_api_key 를 사용합니다.
+try:
+    from openai import OpenAI
+    client = OpenAI(api_key=st.secrets.get("openai_api_key", None))
+except Exception:
+    # 구버전 호환 (필요 시)
+    from openai import OpenAI
+    client = OpenAI(api_key=None)
+
+# ── UI 구성 ───────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="나만의 행성 그림 만들기", layout="wide")
+st.title("나만의 행성 그림 만들기")
+st.caption("Streamlit 서버에서 OpenAI 이미지 API를 호출합니다. 브라우저에 키가 노출되지 않아요.")
+
+# (선택) 수동 키 입력: 로컬 테스트용. 배포 시에는 st.secrets/환경변수 사용 권장
+with st.expander("🔑 API 키 직접 입력(선택)"):
+    manual_key = st.text_input("OpenAI API Key (선택)", type="password", placeholder="sk-...")
+    if manual_key:
+        client = OpenAI(api_key=manual_key)
+
+@dataclass
+class Planet:
+    label: str
+    value: str
+    style_hint: str
+
+PLANETS = [
+    Planet("수성 (Mercury)", "Mercury", "작고 회색빛, 운석 크레이터, 대기 희박, 태양에 매우 가까움"),
+    Planet("금성 (Venus)", "Venus", "두꺼운 황백색 구름, 매우 뜨거움, 부드러운 광채, 약한 표면 디테일"),
+    Planet("지구 (Earth)", "Earth", "푸른 바다, 하얀 구름, 초록과 갈색 대륙, 생명 넘치는 느낌"),
+    Planet("화성 (Mars)", "Mars", "적갈색 사막, 거대한 화산과 협곡, 엷은 대기, 먼지폭풍 가능"),
+    Planet("목성 (Jupiter)", "Jupiter", "갈색과 크림색 줄무늬, 거대한 붉은 점 폭풍, 거대 가스행성"),
+    Planet("토성 (Saturn)", "Saturn", "아름다운 고리, 황금빛 가스층, 섬세한 고리 구조 디테일"),
+    Planet("천왕성 (Uranus)", "Uranus", "밝은 청록색, 옅은 구름, 옆으로 누운 자전축, 차분한 느낌"),
+    Planet("해왕성 (Neptune)", "Neptune", "진한 파란색, 강한 바람, 어두운 점 폭풍 가능, 차갑고 깊은 바다 느낌"),
+]
+
+col_left, col_right = st.columns([1.1, 1])
+
+with col_left:
+    p = st.selectbox("행성 선택", PLANETS, format_func=lambda x: x.label)
+    user_prompt = st.text_area(
+        "프롬프트",
+        placeholder="예) 아이들이 바라보는 만화풍, 별빛이 반짝이는 배경, 따뜻한 색감",
+        height=120,
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        style = st.selectbox(
+            "스타일 (선택)",
+            ["자동", "수채화", "만화풍", "픽셀아트", "유화", "리얼리즘", "플랫 일러스트"],
+            index=0,
+        )
+    with c2:
+        size = st.selectbox("이미지 크기", ["1024x1024", "1024x1792", "1792x1024"], index=0)
+
+    generate = st.button("🎨 그림 만들기", type="primary", use_container_width=True)
+
+with col_right:
+    preview = st.container(border=True)
+    status = st.empty()
+
+# ── 프롬프트 빌드 ──────────────────────────────────────────────────────────────
+def build_prompt(planet: Planet, user_prompt: str, style: str) -> str:
+    style_part = "" if style == "자동" else f" (스타일: {style})"
+    return (
+        f"{planet.value} 행성의 특징을 반영한 일러스트{style_part}. "
+        f"행성 묘사 힌트: {planet.style_hint}. "
+        f"추가 조건: {user_prompt or '자연스러운 우주 배경, 높은 해상도, 디테일 선명'}."
+    )
+
+# ── 이미지 생성 호출 ───────────────────────────────────────────────────────────
+def generate_image(prompt: str, size: str):
+    # 최신 SDK의 이미지 생성 (gpt-image-1)
+    # 반환 형식이 base64인 경우를 처리합니다.
+    try:
+        result = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size=size,
+        )
+        # SDK 결과에서 base64 데이터 추출
+        b64 = result.data[0].b64_json  # type: ignore[attr-defined]
+        return base64.b64decode(b64)
+    except Exception as e:
+        raise RuntimeError(str(e))
+
+# ── 실행 ──────────────────────────────────────────────────────────────────────
+if generate:
+    if not (client and (getattr(client, "api_key", None) or manual_key or st.secrets.get("openai_api_key"))):
+        status.error("API 키가 설정되지 않았습니다. 상단의 API 키 입력 또는 secrets/환경변수로 설정하세요.")
+    else:
+        full_prompt = build_prompt(p, user_prompt, style)
+        status.info("이미지 생성 중… 10~20초 걸릴 수 있어요.")
+        try:
+            img_bytes = generate_image(full_prompt, size)
+            # 미리보기 + 다운로드
+            with preview:
+                st.image(img_bytes, caption="생성된 이미지 미리보기", use_column_width=True)
+                buf = BytesIO(img_bytes)
+                st.download_button(
+                    "이미지 다운로드",
+                    data=buf,
+                    file_name=f"{p.value.lower()}_{size.replace('x','-')}.png",
+                    mime="image/png",
+                    use_container_width=True,
+                )
+            status.success("완료!")
+        except Exception as e:
+            status.error(f"생성 실패: {e}")
+else:
+    with preview:
+        st.markdown("🪐 오른쪽 영역에 결과가 표시됩니다.")
